@@ -15,30 +15,26 @@ conda create -n v2s python=3.10 -y
 conda activate v2s
 ```
 
-安装 ffmpeg：
-
-```powershell
-conda install -c conda-forge ffmpeg -y
-```
-
 安装 Python 依赖：
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
+`requirements.txt` 里包含 `imageio-ffmpeg`，会在当前 Python/conda 环境中提供可用的 ffmpeg。通常不需要再单独运行 `conda install ffmpeg` 或 `winget install ffmpeg`。
+
 检查依赖是否安装成功：
 
 ```powershell
 python --version
-ffmpeg -version
 python -m pip show faster-whisper
+python -m pip show imageio-ffmpeg
 python -m pip show yt-dlp
 ```
 
 ## venv 安装方式
 
-如果不用 conda，也可以用 Python 自带虚拟环境。先安装 Python 3.10+ 和 ffmpeg，并确保 `ffmpeg` 在 PATH 中。
+如果不用 conda，也可以用 Python 自带虚拟环境。先安装 Python 3.10+。
 
 ```powershell
 python -m venv .venv
@@ -166,17 +162,32 @@ python -m pip install -r requirements.txt
 
 ### 找不到 ffmpeg
 
-说明当前环境或系统 PATH 中没有 ffmpeg。conda 用户可以运行：
+本项目会按下面顺序自动寻找 ffmpeg：
+
+1. 系统 PATH 里的 `ffmpeg`。
+2. 当前 conda/venv 环境里的 `ffmpeg`。
+3. `imageio-ffmpeg` 随 Python 依赖提供的 ffmpeg。
+
+如果仍然提示找不到 ffmpeg，先确认 Python 依赖已经安装到当前环境：
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pip show imageio-ffmpeg
+```
+
+也可以让程序使用指定路径的 ffmpeg：
+
+```powershell
+python transcribe_video.py "视频链接" --ffmpeg "C:\path\to\ffmpeg.exe"
+```
+
+如果你仍想把 ffmpeg 作为 conda 包安装，可以手动尝试：
 
 ```powershell
 conda install -c conda-forge ffmpeg -y
 ```
 
-然后检查：
-
-```powershell
-ffmpeg -version
-```
+但 Windows 上 conda-forge 安装 `ffmpeg` 有时会遇到 `gdk-pixbuf`、`Rolling back transaction`、`UnicodeDecodeError('gbk', ...)` 之类的依赖脚本问题。现在脚本已经不依赖这条安装路径，优先使用 `imageio-ffmpeg` 即可。
 
 ### Hugging Face 提示 HF_TOKEN
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -29,14 +30,68 @@ def slugify(value: str, fallback: str = "video") -> str:
     return value[:80] or fallback
 
 
-def require_ffmpeg() -> None:
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError(
-            "找不到 ffmpeg。请先安装 ffmpeg，并确保 ffmpeg.exe 已加入 PATH。"
+def _ffmpeg_candidates() -> list[Path]:
+    candidates: list[Path] = []
+
+    found = shutil.which("ffmpeg")
+    if found:
+        candidates.append(Path(found))
+
+    prefixes = [
+        os.environ.get("CONDA_PREFIX"),
+        sys.prefix,
+    ]
+    for raw_prefix in prefixes:
+        if not raw_prefix:
+            continue
+        prefix = Path(raw_prefix)
+        candidates.extend(
+            [
+                prefix / "Library" / "bin" / "ffmpeg.exe",
+                prefix / "bin" / "ffmpeg",
+                prefix / "Scripts" / "ffmpeg.exe",
+            ]
         )
 
+    return candidates
 
-def download_audio(url: str, download_dir: Path) -> tuple[Path, str]:
+
+def _imageio_ffmpeg_path() -> Path | None:
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        return None
+
+    path = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    return path if path.exists() else None
+
+
+def find_ffmpeg(explicit_path: str | None = None) -> Path:
+    if explicit_path:
+        explicit = Path(explicit_path)
+        if explicit.exists():
+            return explicit
+        found = shutil.which(explicit_path)
+        if found:
+            return Path(found)
+        raise RuntimeError(f"ffmpeg not found at: {explicit_path}")
+
+    for candidate in _ffmpeg_candidates():
+        if candidate.exists():
+            return candidate
+
+    imageio_path = _imageio_ffmpeg_path()
+    if imageio_path:
+        return imageio_path
+
+    raise RuntimeError(
+        "ffmpeg was not found. Install dependencies with "
+        "'python -m pip install -r requirements.txt', or pass "
+        "--ffmpeg C:\\path\\to\\ffmpeg.exe."
+    )
+
+
+def download_audio(url: str, download_dir: Path, ffmpeg_path: Path) -> tuple[Path, str]:
     download_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(download_dir / "%(title).80s-%(id)s.%(ext)s")
     options = {
@@ -44,6 +99,7 @@ def download_audio(url: str, download_dir: Path) -> tuple[Path, str]:
         "outtmpl": output_template,
         "noplaylist": True,
         "quiet": False,
+        "ffmpeg_location": str(ffmpeg_path.parent),
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -65,15 +121,15 @@ def download_audio(url: str, download_dir: Path) -> tuple[Path, str]:
             audio_path = candidates[-1]
 
     if not audio_path.exists():
-        raise RuntimeError("音频下载完成后没有找到 mp3 文件。")
+        raise RuntimeError("Audio download finished, but no mp3 file was found.")
 
     return audio_path, title
 
 
-def normalize_audio(source: Path, target: Path) -> Path:
+def normalize_audio(source: Path, target: Path, ffmpeg_path: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     command = [
-        "ffmpeg",
+        str(ffmpeg_path),
         "-y",
         "-i",
         str(source),
@@ -161,24 +217,29 @@ def write_json(path: Path, title: str, metadata: dict, segments: list[Segment]) 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="把视频链接下载为音频，并用本地 faster-whisper 生成文稿/字幕。"
+        description="Download video audio and transcribe it locally with faster-whisper."
     )
-    parser.add_argument("url", help="视频链接，例如 YouTube/Bilibili 等 yt-dlp 支持的地址")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Whisper 模型名，默认 small")
-    parser.add_argument("--language", default=None, help="语言代码，例如 zh/en；不填则自动识别")
-    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"], help="推理设备")
+    parser.add_argument("url", help="Video URL supported by yt-dlp, such as YouTube or Bilibili")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Whisper model name, default: small")
+    parser.add_argument("--language", default=None, help="Language code, such as zh/en. Empty means auto-detect")
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"], help="Inference device")
     parser.add_argument(
         "--compute-type",
         default="int8",
-        help="计算精度。CPU 推荐 int8；NVIDIA GPU 可试 float16",
+        help="Compute type. CPU: int8; NVIDIA GPU can try float16",
     )
-    parser.add_argument("--beam-size", type=int, default=5, help="搜索宽度，越大可能越准但越慢")
-    parser.add_argument("--downloads-dir", default="downloads", help="音频下载目录")
-    parser.add_argument("--outputs-dir", default="outputs", help="文稿输出目录")
+    parser.add_argument("--beam-size", type=int, default=5, help="Beam size. Higher may be more accurate but slower")
+    parser.add_argument("--downloads-dir", default="downloads", help="Audio download directory")
+    parser.add_argument("--outputs-dir", default="outputs", help="Transcript output directory")
+    parser.add_argument(
+        "--ffmpeg",
+        default=None,
+        help="Optional ffmpeg executable path. Useful when conda has ffmpeg but PATH does not.",
+    )
     parser.add_argument(
         "--keep-raw",
         action="store_true",
-        help="保留 yt-dlp 提取出的原始 mp3；默认仍会保留规范化后的识别音频",
+        help="Keep the raw extracted mp3. The normalized recognition mp3 is always kept.",
     )
     return parser.parse_args()
 
@@ -186,15 +247,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        require_ffmpeg()
+        ffmpeg_path = find_ffmpeg(args.ffmpeg)
+        print(f"Using ffmpeg: {ffmpeg_path}")
+
         download_dir = Path(args.downloads_dir)
         output_dir = Path(args.outputs_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        audio_path, title = download_audio(args.url, download_dir)
+        audio_path, title = download_audio(args.url, download_dir, ffmpeg_path)
         base_name = slugify(title)
         normalized_path = download_dir / f"{base_name}.16k.mp3"
-        normalize_audio(audio_path, normalized_path)
+        normalize_audio(audio_path, normalized_path, ffmpeg_path)
 
         if not args.keep_raw and audio_path != normalized_path:
             audio_path.unlink(missing_ok=True)
@@ -215,13 +278,13 @@ def main() -> int:
         write_srt(srt_path, segments)
         write_json(json_path, title, metadata, segments)
 
-        print("完成。输出文件：")
+        print("Done. Output files:")
         print(f"- {txt_path}")
         print(f"- {srt_path}")
         print(f"- {json_path}")
         return 0
     except Exception as exc:
-        print(f"错误：{exc}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
 
