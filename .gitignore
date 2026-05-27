@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+downloads/*
+!downloads/.gitkeep
+outputs/*
+!outputs/.gitkeep
+.cache/
