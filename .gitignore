@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.conda-v2s/
 downloads/*
 !downloads/.gitkeep
 outputs/*

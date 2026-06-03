@@ -7,16 +7,126 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from faster_whisper import WhisperModel
-from yt_dlp import YoutubeDL
-
 
 DEFAULT_MODEL = "small"
 DEFAULT_OUTPUT_FORMATS = ("txt", "srt", "json")
+BILIBILI_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.bilibili.com/",
+}
+
+
+_DLL_DIRECTORY_HANDLES: list[object] = []
+_DLL_DIRECTORIES_ADDED: set[str] = set()
+
+
+def _add_windows_dll_directory(path: Path) -> None:
+    if not path.exists():
+        return
+
+    path_text = str(path.resolve())
+    if path_text in _DLL_DIRECTORIES_ADDED:
+        return
+
+    if hasattr(os, "add_dll_directory"):
+        try:
+            _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(path_text))
+        except OSError:
+            pass
+
+    path_parts = os.environ.get("PATH", "").split(os.pathsep)
+    if path_text not in path_parts:
+        os.environ["PATH"] = path_text + os.pathsep + os.environ.get("PATH", "")
+
+    _DLL_DIRECTORIES_ADDED.add(path_text)
+
+
+def prepare_windows_dll_paths() -> None:
+    if os.name != "nt":
+        return
+
+    candidates = [
+        Path(sys.prefix) / "Library" / "bin",
+        Path(sys.prefix) / "bin",
+        Path(sys.prefix) / "Scripts",
+    ]
+
+    for key in ("CUDA_PATH", "CUDA_HOME"):
+        cuda_root = os.environ.get(key)
+        if cuda_root:
+            candidates.append(Path(cuda_root) / "bin")
+
+    for scheme_key in ("purelib", "platlib"):
+        site_packages = sysconfig.get_paths().get(scheme_key)
+        if not site_packages:
+            continue
+        nvidia_root = Path(site_packages) / "nvidia"
+        candidates.extend(
+            [
+                nvidia_root / "cublas" / "bin",
+                nvidia_root / "cublas" / "lib",
+                nvidia_root / "cublas" / "lib" / "x64",
+                nvidia_root / "cuda_runtime" / "bin",
+                nvidia_root / "cuda_runtime" / "lib",
+                nvidia_root / "cuda_runtime" / "lib" / "x64",
+                nvidia_root / "cudnn" / "bin",
+                nvidia_root / "cudnn" / "lib",
+                nvidia_root / "cudnn" / "lib" / "x64",
+                nvidia_root / "cuda_nvrtc" / "bin",
+                nvidia_root / "cuda_nvrtc" / "lib",
+                nvidia_root / "cuda_nvrtc" / "lib" / "x64",
+                Path(site_packages) / "torch" / "lib",
+            ]
+        )
+
+    for candidate in candidates:
+        _add_windows_dll_directory(candidate)
+
+
+def cuda_diagnostics() -> str:
+    prepare_windows_dll_paths()
+    try:
+        import ctranslate2
+    except Exception as exc:
+        return f"CUDA check failed: ctranslate2 import error: {exc}"
+
+    try:
+        device_count = ctranslate2.get_cuda_device_count()
+        if device_count <= 0:
+            return "CUDA check: no CUDA device detected by ctranslate2."
+        compute_types = sorted(ctranslate2.get_supported_compute_types("cuda"))
+        return (
+            f"CUDA check: {device_count} device(s), "
+            f"supported compute types: {', '.join(compute_types)}"
+        )
+    except Exception as exc:
+        return f"CUDA check failed: {exc}"
+
+
+def explain_cuda_runtime_error(message: str) -> str | None:
+    lowered = message.lower()
+    if "cublas64_12.dll" in lowered or "cublas" in lowered:
+        return (
+            "CUDA runtime is incomplete: cublas64_12.dll was not found. "
+            "The NVIDIA driver is not enough for faster-whisper CUDA mode; "
+            "install CUDA 12 runtime libraries in the same conda environment, "
+            "or install CUDA Toolkit 12.x system-wide and restart the GUI."
+        )
+    if "cudnn" in lowered:
+        return (
+            "CUDA runtime is incomplete: cuDNN was not found or could not be loaded. "
+            "Install a cuDNN version compatible with the installed ctranslate2 package."
+        )
+    return None
 
 
 @dataclass
@@ -100,7 +210,16 @@ def find_ffmpeg(explicit_path: str | None = None) -> Path:
     )
 
 
-def download_audio(url: str, download_dir: Path, ffmpeg_path: Path) -> tuple[Path, str]:
+def download_audio(
+    url: str,
+    download_dir: Path,
+    ffmpeg_path: Path,
+    *,
+    cookies: str | None = None,
+    cookies_from_browser: str | None = None,
+) -> tuple[Path, str]:
+    from yt_dlp import YoutubeDL
+
     download_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(download_dir / "%(title).80s-%(id)s.%(ext)s")
     options = {
@@ -109,6 +228,7 @@ def download_audio(url: str, download_dir: Path, ffmpeg_path: Path) -> tuple[Pat
         "noplaylist": True,
         "quiet": False,
         "ffmpeg_location": str(ffmpeg_path),
+        "http_headers": BILIBILI_HEADERS,
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -117,6 +237,10 @@ def download_audio(url: str, download_dir: Path, ffmpeg_path: Path) -> tuple[Pat
             }
         ],
     }
+    if cookies:
+        options["cookiefile"] = cookies
+    if cookies_from_browser:
+        options["cookiesfrombrowser"] = (cookies_from_browser,)
 
     with YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -163,7 +287,23 @@ def transcribe_audio(
     compute_type: str,
     beam_size: int,
 ) -> tuple[list[Segment], dict]:
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    prepare_windows_dll_paths()
+    from faster_whisper import WhisperModel
+
+    try:
+        model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    except Exception as exc:
+        message = str(exc)
+        if "LocalEntryNotFoundError" in message or "ConnectError" in message:
+            raise RuntimeError(
+                "Could not load the Whisper model. The model is not cached locally "
+                "and downloading from Hugging Face failed. Check the network/proxy, "
+                "or run once with a working connection so the model can be cached."
+            ) from exc
+        cuda_message = explain_cuda_runtime_error(message)
+        if cuda_message:
+            raise RuntimeError(cuda_message) from exc
+        raise
     segments_iter, info = model.transcribe(
         str(audio_path),
         language=language,
@@ -236,6 +376,8 @@ def transcribe_video_url(
     ffmpeg: str | None = None,
     output_formats: Iterable[str] = DEFAULT_OUTPUT_FORMATS,
     keep_raw: bool = False,
+    cookies: str | None = None,
+    cookies_from_browser: str | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> TranscriptionResult:
     def report(message: str) -> None:
@@ -249,7 +391,13 @@ def transcribe_video_url(
 
     report(f"Using ffmpeg: {ffmpeg_path}")
     report("Downloading audio...")
-    audio_path, title = download_audio(url, output_dir, ffmpeg_path)
+    audio_path, title = download_audio(
+        url,
+        output_dir,
+        ffmpeg_path,
+        cookies=cookies,
+        cookies_from_browser=cookies_from_browser,
+    )
     base_name = slugify(title)
     normalized_path = output_dir / f"{base_name}.16k.mp3"
 
@@ -259,6 +407,9 @@ def transcribe_video_url(
     if not keep_raw and audio_path != normalized_path:
         audio_path.unlink(missing_ok=True)
 
+    report(f"Python: {sys.executable}")
+    if device == "cuda":
+        report(cuda_diagnostics())
     report("Transcribing audio...")
     segments, metadata = transcribe_audio(
         normalized_path,
@@ -317,6 +468,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep the raw extracted mp3. The normalized recognition mp3 is always kept.",
     )
+    parser.add_argument(
+        "--cookies",
+        default=None,
+        help="Optional cookies.txt file. Useful for Bilibili 412/login/region checks.",
+    )
+    parser.add_argument(
+        "--cookies-from-browser",
+        default=None,
+        choices=["brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi"],
+        help="Load cookies from an installed browser profile, for example: chrome or edge.",
+    )
     return parser.parse_args()
 
 
@@ -334,6 +496,8 @@ def main() -> int:
             ffmpeg=args.ffmpeg,
             output_formats=DEFAULT_OUTPUT_FORMATS,
             keep_raw=args.keep_raw,
+            cookies=args.cookies,
+            cookies_from_browser=args.cookies_from_browser,
             progress=print,
         )
 

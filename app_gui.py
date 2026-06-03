@@ -21,6 +21,7 @@ LANGUAGE_OPTIONS = [
 ]
 
 MODEL_OPTIONS = ["tiny", "base", "small", "medium", "large-v3"]
+BROWSER_COOKIE_OPTIONS = ["", "chrome", "edge", "firefox", "brave", "chromium", "opera", "vivaldi"]
 
 
 class VideoTranscriberApp(tk.Tk):
@@ -38,18 +39,20 @@ class VideoTranscriberApp(tk.Tk):
         self.language_var = tk.StringVar(value=LANGUAGE_OPTIONS[0][0])
         self.model_var = tk.StringVar(value=DEFAULT_MODEL)
         self.device_var = tk.StringVar(value="cpu")
+        self.cookies_var = tk.StringVar()
+        self.browser_cookie_var = tk.StringVar(value=BROWSER_COOKIE_OPTIONS[0])
 
         self._build_ui()
         self.after(150, self._poll_events)
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(5, weight=1)
 
         container = ttk.Frame(self, padding=16)
         container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(1, weight=1)
-        container.rowconfigure(5, weight=1)
+        container.rowconfigure(7, weight=1)
 
         ttk.Label(container, text="Video URL").grid(row=0, column=0, sticky="w", pady=(0, 6))
         url_entry = ttk.Entry(container, textvariable=self.url_var)
@@ -91,9 +94,24 @@ class VideoTranscriberApp(tk.Tk):
         self.start_button = ttk.Button(container, text="Start", command=self._start)
         self.start_button.grid(row=3, column=3, sticky="e", pady=6)
 
-        ttk.Label(container, text="Progress").grid(row=4, column=0, sticky="w", pady=(14, 6))
+        ttk.Label(container, text="Cookies file").grid(row=4, column=0, sticky="w", pady=6)
+        ttk.Entry(container, textvariable=self.cookies_var).grid(row=4, column=1, sticky="ew", pady=6)
+        ttk.Button(container, text="Browse...", command=self._choose_cookies).grid(
+            row=4, column=2, sticky="ew", padx=(8, 0), pady=6
+        )
+
+        ttk.Label(container, text="Browser cookies").grid(row=5, column=0, sticky="w", pady=6)
+        ttk.Combobox(
+            container,
+            textvariable=self.browser_cookie_var,
+            values=BROWSER_COOKIE_OPTIONS,
+            state="readonly",
+            width=10,
+        ).grid(row=5, column=1, sticky="w", pady=6)
+
+        ttk.Label(container, text="Progress").grid(row=6, column=0, sticky="w", pady=(14, 6))
         log_frame = ttk.Frame(container)
-        log_frame.grid(row=5, column=0, columnspan=4, sticky="nsew")
+        log_frame.grid(row=7, column=0, columnspan=4, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
@@ -105,7 +123,7 @@ class VideoTranscriberApp(tk.Tk):
 
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(container, textvariable=self.status_var).grid(
-            row=6, column=0, columnspan=4, sticky="w", pady=(10, 0)
+            row=8, column=0, columnspan=4, sticky="w", pady=(10, 0)
         )
 
         url_entry.focus_set()
@@ -114,6 +132,14 @@ class VideoTranscriberApp(tk.Tk):
         folder = filedialog.askdirectory(title="Choose save folder")
         if folder:
             self.folder_var.set(folder)
+
+    def _choose_cookies(self) -> None:
+        cookies = filedialog.askopenfilename(
+            title="Choose cookies.txt",
+            filetypes=[("Cookies text file", "*.txt"), ("All files", "*.*")],
+        )
+        if cookies:
+            self.cookies_var.set(cookies)
 
     def _selected_language(self) -> str | None:
         selected = self.language_var.get()
@@ -148,12 +174,14 @@ class VideoTranscriberApp(tk.Tk):
         language = self._selected_language()
         device = self.device_var.get()
         compute_type = "float16" if device == "cuda" else "int8"
+        cookies = self.cookies_var.get().strip() or None
+        browser_cookies = self.browser_cookie_var.get().strip() or None
 
         self._set_running(True)
         self._append_log("Starting...")
         self.worker = threading.Thread(
             target=self._run_transcription,
-            args=(url, save_dir, model, language, device, compute_type),
+            args=(url, save_dir, model, language, device, compute_type, cookies, browser_cookies),
             daemon=True,
         )
         self.worker.start()
@@ -166,6 +194,8 @@ class VideoTranscriberApp(tk.Tk):
         language: str | None,
         device: str,
         compute_type: str,
+        cookies: str | None,
+        browser_cookies: str | None,
     ) -> None:
         try:
             result = transcribe_video_url(
@@ -176,6 +206,8 @@ class VideoTranscriberApp(tk.Tk):
                 device=device,
                 compute_type=compute_type,
                 output_formats=("srt",),
+                cookies=cookies,
+                cookies_from_browser=browser_cookies,
                 progress=lambda message: self.events.put(("log", message)),
             )
             self.events.put(("done", result))
