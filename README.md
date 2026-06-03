@@ -6,6 +6,21 @@
 2. `ffmpeg` 把音频转成 16kHz 单声道 mp3。
 3. `faster-whisper` 在本机运行 Whisper 模型，输出 `txt`、`srt`、`json`。
 
+## 当前版本
+
+这是新的可用 GUI 版本，推荐直接运行图形界面：
+
+```powershell
+python app_gui.py
+```
+
+GUI 已支持：
+
+- 选择保存文件夹、语言、模型和 CPU/CUDA 设备。
+- 生成 `.srt` 字幕和 `.16k.mp3` 识别音频。
+- 为 B 站等站点选择浏览器 cookies 或导入 `cookies.txt`。
+- 在 CUDA 模式下输出 Python 路径和 CUDA 诊断信息，方便排查环境问题。
+
 ## Conda 安装方式
 
 推荐使用 Python 3.10 的 conda 环境。`faster-whisper` 依赖的底层库在 Python 3.10/3.11 上通常更稳。
@@ -52,6 +67,12 @@ python -m pip install -r requirements.txt
 python app_gui.py
 ```
 
+如果使用项目内的 Python 3.10 环境，可以直接运行：
+
+```powershell
+.\run_gui_310.ps1
+```
+
 GUI 中输入视频链接，点击 `Browse...` 选择保存文件夹，再点击 `Start`。完成后，所选文件夹中会生成：
 
 - `.srt`：字幕文件。
@@ -79,6 +100,19 @@ B 站视频也可以尝试直接输入链接，只要 `yt-dlp` 能下载该视�
 
 ```powershell
 python transcribe_video.py "https://www.bilibili.com/video/BVxxxxxx" --language zh --model small
+```
+
+如果 B 站提示 `HTTP Error 412: Precondition Failed`，通常是 B 站拦截了匿名下载请求。先升级 `yt-dlp`：
+
+```powershell
+python -m pip install -U yt-dlp
+```
+
+然后在 GUI 里选择 `Browser cookies` 为 `chrome` 或 `edge`，或者选择导出的 `cookies.txt`。命令行也可以这样运行：
+
+```powershell
+python transcribe_video.py "https://www.bilibili.com/video/BVxxxxxx" --language zh --cookies-from-browser chrome
+python transcribe_video.py "https://www.bilibili.com/video/BVxxxxxx" --language zh --cookies "C:\path\to\cookies.txt"
 ```
 
 如果是中英混合内容，可以不写 `--language`，让模型自动判断：
@@ -128,6 +162,12 @@ python transcribe_video.py "视频链接" --language es --model small
 
 ```powershell
 python transcribe_video.py "视频链接" --device cuda --compute-type float16 --model medium
+```
+
+Windows 上 `faster-whisper` 的 CUDA 模式还需要 CUDA runtime 相关 DLL。只有显卡驱动不一定够；如果提示 `cublas64_12.dll is not found or cannot be loaded`，通常需要在当前 conda 环境安装 cuBLAS，或安装 CUDA Toolkit 12.x 后重启终端和 GUI：
+
+```powershell
+conda install -c conda-forge "libcublas=12.*" -y
 ```
 
 CPU 用户建议保持默认：
@@ -201,6 +241,16 @@ conda install -c conda-forge ffmpeg -y
 ```
 
 但 Windows 上 conda-forge 安装 `ffmpeg` 有时会遇到 `gdk-pixbuf`、`Rolling back transaction`、`UnicodeDecodeError('gbk', ...)` 之类的依赖脚本问题。现在脚本已经不依赖这条安装路径，优先使用 `imageio-ffmpeg` 即可。
+
+### B 站 HTTP Error 412
+
+这通常不是 GUI 本身的问题，而是 `yt-dlp` 请求 B 站网页时被拦截。处理顺序：
+
+1. 升级 `yt-dlp`：`python -m pip install -U yt-dlp`
+2. 在 GUI 中选择 `Browser cookies` 为你已经登录 B 站的浏览器，例如 `chrome` 或 `edge`。
+3. 如果浏览器 cookie 读取失败，可以导出 `cookies.txt`，然后在 GUI 的 `Cookies file` 中选择它。
+
+只有公开视频不一定需要 cookies；登录可见、风控较严格、地区/年龄/会员相关的视频通常更需要 cookies。
 
 ### Hugging Face 提示 HF_TOKEN
 
