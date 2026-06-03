@@ -46,6 +46,19 @@ python -m pip install -r requirements.txt
 
 默认不写 `--language` 时，程序会自动识别视频里的语音语言。
 
+启动图形界面：
+
+```powershell
+python app_gui.py
+```
+
+GUI 中输入视频链接，点击 `Browse...` 选择保存文件夹，再点击 `Start`。完成后，所选文件夹中会生成：
+
+- `.srt`：字幕文件。
+- `.16k.mp3`：用于识别的音频文件。
+
+命令行方式：
+
 ```powershell
 python transcribe_video.py "https://example.com/video-url"
 ```

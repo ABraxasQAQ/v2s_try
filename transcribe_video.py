@@ -9,13 +9,14 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from faster_whisper import WhisperModel
 from yt_dlp import YoutubeDL
 
 
 DEFAULT_MODEL = "small"
+DEFAULT_OUTPUT_FORMATS = ("txt", "srt", "json")
 
 
 @dataclass
@@ -23,6 +24,14 @@ class Segment:
     start: float
     end: float
     text: str
+
+
+@dataclass
+class TranscriptionResult:
+    title: str
+    audio_path: Path
+    output_paths: dict[str, Path]
+    metadata: dict
 
 
 def slugify(value: str, fallback: str = "video") -> str:
@@ -99,7 +108,7 @@ def download_audio(url: str, download_dir: Path, ffmpeg_path: Path) -> tuple[Pat
         "outtmpl": output_template,
         "noplaylist": True,
         "quiet": False,
-        "ffmpeg_location": str(ffmpeg_path.parent),
+        "ffmpeg_location": str(ffmpeg_path),
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -215,6 +224,74 @@ def write_json(path: Path, title: str, metadata: dict, segments: list[Segment]) 
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def transcribe_video_url(
+    url: str,
+    output_dir: Path,
+    *,
+    model_name: str = DEFAULT_MODEL,
+    language: str | None = None,
+    device: str = "cpu",
+    compute_type: str = "int8",
+    beam_size: int = 5,
+    ffmpeg: str | None = None,
+    output_formats: Iterable[str] = DEFAULT_OUTPUT_FORMATS,
+    keep_raw: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> TranscriptionResult:
+    def report(message: str) -> None:
+        if progress:
+            progress(message)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg_path = find_ffmpeg(ffmpeg)
+    formats = {item.lower().lstrip(".") for item in output_formats}
+
+    report(f"Using ffmpeg: {ffmpeg_path}")
+    report("Downloading audio...")
+    audio_path, title = download_audio(url, output_dir, ffmpeg_path)
+    base_name = slugify(title)
+    normalized_path = output_dir / f"{base_name}.16k.mp3"
+
+    report("Converting audio...")
+    normalize_audio(audio_path, normalized_path, ffmpeg_path)
+
+    if not keep_raw and audio_path != normalized_path:
+        audio_path.unlink(missing_ok=True)
+
+    report("Transcribing audio...")
+    segments, metadata = transcribe_audio(
+        normalized_path,
+        model_name=model_name,
+        language=language,
+        device=device,
+        compute_type=compute_type,
+        beam_size=beam_size,
+    )
+
+    output_paths: dict[str, Path] = {}
+    if "txt" in formats:
+        txt_path = output_dir / f"{base_name}.txt"
+        write_txt(txt_path, title, segments)
+        output_paths["txt"] = txt_path
+    if "srt" in formats:
+        srt_path = output_dir / f"{base_name}.srt"
+        write_srt(srt_path, segments)
+        output_paths["srt"] = srt_path
+    if "json" in formats:
+        json_path = output_dir / f"{base_name}.json"
+        write_json(json_path, title, metadata, segments)
+        output_paths["json"] = json_path
+
+    report("Done.")
+    return TranscriptionResult(
+        title=title,
+        audio_path=normalized_path,
+        output_paths=output_paths,
+        metadata=metadata,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download video audio and transcribe it locally with faster-whisper."
@@ -229,7 +306,6 @@ def parse_args() -> argparse.Namespace:
         help="Compute type. CPU: int8; NVIDIA GPU can try float16",
     )
     parser.add_argument("--beam-size", type=int, default=5, help="Beam size. Higher may be more accurate but slower")
-    parser.add_argument("--downloads-dir", default="downloads", help="Audio download directory")
     parser.add_argument("--outputs-dir", default="outputs", help="Transcript output directory")
     parser.add_argument(
         "--ffmpeg",
@@ -247,41 +323,24 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        ffmpeg_path = find_ffmpeg(args.ffmpeg)
-        print(f"Using ffmpeg: {ffmpeg_path}")
-
-        download_dir = Path(args.downloads_dir)
-        output_dir = Path(args.outputs_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        audio_path, title = download_audio(args.url, download_dir, ffmpeg_path)
-        base_name = slugify(title)
-        normalized_path = download_dir / f"{base_name}.16k.mp3"
-        normalize_audio(audio_path, normalized_path, ffmpeg_path)
-
-        if not args.keep_raw and audio_path != normalized_path:
-            audio_path.unlink(missing_ok=True)
-
-        segments, metadata = transcribe_audio(
-            normalized_path,
+        result = transcribe_video_url(
+            args.url,
+            Path(args.outputs_dir),
             model_name=args.model,
             language=args.language,
             device=args.device,
             compute_type=args.compute_type,
             beam_size=args.beam_size,
+            ffmpeg=args.ffmpeg,
+            output_formats=DEFAULT_OUTPUT_FORMATS,
+            keep_raw=args.keep_raw,
+            progress=print,
         )
 
-        txt_path = output_dir / f"{base_name}.txt"
-        srt_path = output_dir / f"{base_name}.srt"
-        json_path = output_dir / f"{base_name}.json"
-        write_txt(txt_path, title, segments)
-        write_srt(srt_path, segments)
-        write_json(json_path, title, metadata, segments)
-
         print("Done. Output files:")
-        print(f"- {txt_path}")
-        print(f"- {srt_path}")
-        print(f"- {json_path}")
+        print(f"- {result.audio_path}")
+        for path in result.output_paths.values():
+            print(f"- {path}")
         return 0
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
